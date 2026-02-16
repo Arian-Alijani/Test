@@ -1,157 +1,35 @@
-name: List Available Runners
+name: Self-Hosted Runner Smoke Test
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"
-
-permissions:
-  actions: read
-  contents: read
 
 jobs:
-  list-runners:
-    runs-on: ubuntu-latest
+  smoke:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
     steps:
-      - name: Repo context
+      - name: Print runner context
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "repo=${GITHUB_REPOSITORY}"
-          echo "owner=${GITHUB_REPOSITORY_OWNER}"
-          echo "actor=${GITHUB_ACTOR}"
-          echo "run_id=${GITHUB_RUN_ID}"
+          echo "Runner picked successfully."
+          echo "RUNNER_NAME=${RUNNER_NAME}"
+          echo "RUNNER_OS=${RUNNER_OS}"
+          echo "RUNNER_ARCH=${RUNNER_ARCH}"
+          echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
+          echo "GITHUB_RUN_ID=${GITHUB_RUN_ID}"
+          echo "UTC_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-      - name: Fetch repository runners
-        id: repo_runners
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_READ_TOKEN }}
-          FALLBACK_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -Eeuo pipefail
-          TOKEN="${GH_TOKEN:-}"
-          if [[ -z "$TOKEN" ]]; then
-            TOKEN="$FALLBACK_TOKEN"
-            echo "RUNNER_READ_TOKEN is not set. Using github.token (may return 403 for self-hosted runner APIs)."
-          else
-            echo "Using RUNNER_READ_TOKEN secret for runner inventory API calls."
-          fi
-
-          API_URL="https://api.github.com/repos/${REPO}/actions/runners?per_page=100"
-          HTTP_CODE="$(curl -sS -w "%{http_code}" -o repo-runners.json \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$API_URL")"
-
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "Could not fetch repo runners. HTTP=$HTTP_CODE (continuing)."
-            cat repo-runners.json
-            echo "{\"note\":\"repo runner listing unavailable\",\"http_code\":\"$HTTP_CODE\"}" > repo-runners.json
-            echo "total_repo_runners=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          TOTAL="$(jq -r '.total_count // 0' repo-runners.json)"
-          echo "total_repo_runners=$TOTAL" >> "$GITHUB_OUTPUT"
-
-      - name: Print repository runners in logs
+      - name: Validate expected platform
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "=== Repository Runners ==="
-          jq -r '
-            if has("runners") and (.runners | length) == 0 then
-              "No runners visible at repository level."
-            elif has("runners") then
-              .runners[]
-              | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
-            else
-              "Repository runners unavailable (likely missing permission token)."
-            end
-          ' repo-runners.json
+          [[ "${RUNNER_OS}" == "Linux" ]] || { echo "Expected Linux runner, got ${RUNNER_OS}"; exit 1; }
+          [[ "${RUNNER_ARCH}" == "X64" ]] || { echo "Expected X64 runner, got ${RUNNER_ARCH}"; exit 1; }
+          echo "Platform validation passed."
 
-      - name: Try organization runners (best effort)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_READ_TOKEN }}
-          FALLBACK_TOKEN: ${{ github.token }}
-          ORG: ${{ github.repository_owner }}
-        run: |
-          set -Eeuo pipefail
-          TOKEN="${GH_TOKEN:-}"
-          if [[ -z "$TOKEN" ]]; then
-            TOKEN="$FALLBACK_TOKEN"
-          fi
-
-          API_URL="https://api.github.com/orgs/${ORG}/actions/runners?per_page=100"
-          HTTP_CODE="$(curl -sS -w "%{http_code}" -o org-runners.json \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$API_URL" || true)"
-
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "Cannot read org runners (likely permission scope). HTTP=$HTTP_CODE"
-            echo "{\"note\":\"org runner listing unavailable\",\"http_code\":\"$HTTP_CODE\"}" > org-runners.json
-            exit 0
-          fi
-
-          echo "=== Organization Runners ==="
-          jq -r '
-            if (.runners | length) == 0 then
-              "No org runners visible."
-            else
-              .runners[]
-              | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
-            end
-          ' org-runners.json
-
-      - name: Build summary
+      - name: Done
         shell: bash
         run: |
           set -Eeuo pipefail
-          {
-            echo "## Runner Inventory"
-            echo
-            echo "Repository: \`${GITHUB_REPOSITORY}\`"
-            echo "Run ID: \`${GITHUB_RUN_ID}\`"
-            echo
-            echo "### Repository Runners"
-            jq -r '
-              if has("runners") and (.runners | length) == 0 then
-                "- No runners visible."
-              elif has("runners") then
-                .runners[]
-                | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
-              else
-                "- Unavailable: insufficient permission token for repository runner API."
-              end
-            ' repo-runners.json
-            echo
-            echo "### Organization Runners (best effort)"
-            jq -r '
-              if has("runners") then
-                if (.runners | length) == 0 then
-                  "- No org runners visible."
-                else
-                  .runners[]
-                  | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
-                end
-              else
-                "- Unavailable: insufficient permission or not an org repository."
-              end
-            ' org-runners.json
-            echo
-            echo "### Note"
-            echo "- For full visibility, set repository secret \`RUNNER_READ_TOKEN\`."
-            echo "- Fine-grained PAT needs repository Administration (read) for repo runners; org runners also require org-level permissions."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload runner reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-inventory
-          path: |
-            repo-runners.json
-            org-runners.json
+          echo "کار انجام شد: self-hosted runner پیدا شد و job با موفقیت اجرا شد."
