@@ -164,20 +164,29 @@ jobs:
           $ErrorActionPreference = "Stop"
           $xrayExe = "${env:XRAY_DIR}\\xray.exe"
           $configPath = "${env:XRAY_DIR}\\config.json"
-          $logPath = "${env:XRAY_DIR}\\xray-runtime.log"
+          $stdoutLogPath = "${env:XRAY_DIR}\\xray-runtime.out.log"
+          $stderrLogPath = "${env:XRAY_DIR}\\xray-runtime.err.log"
 
           Write-Host "[INFO] Starting Xray in background..."
-          $proc = Start-Process -FilePath $xrayExe -ArgumentList "run", "-c", $configPath -RedirectStandardOutput $logPath -RedirectStandardError $logPath -PassThru
+          $proc = Start-Process -FilePath $xrayExe -ArgumentList "run", "-c", $configPath -RedirectStandardOutput $stdoutLogPath -RedirectStandardError $stderrLogPath -PassThru
           Start-Sleep -Seconds 5
 
           if ($proc.HasExited) {
             Write-Host "[ERROR] Xray exited immediately. Dumping log:"
-            if (Test-Path $logPath) { Get-Content $logPath -Tail 200 }
+            if (Test-Path $stdoutLogPath) {
+              Write-Host "[ERROR] Last stdout lines:"
+              Get-Content $stdoutLogPath -Tail 200
+            }
+            if (Test-Path $stderrLogPath) {
+              Write-Host "[ERROR] Last stderr lines:"
+              Get-Content $stderrLogPath -Tail 200
+            }
             throw "Xray process is not running."
           }
 
           "XRAY_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "XRAY_LOG_PATH=$logPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_STDOUT_LOG_PATH=$stdoutLogPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_STDERR_LOG_PATH=$stderrLogPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "[INFO] Xray started with PID: $($proc.Id)"
 
       - name: Build and print client URI
@@ -226,8 +235,13 @@ jobs:
             $proc = Get-Process -Id ${env:XRAY_PID} -ErrorAction SilentlyContinue
             if (-not $proc) {
               Write-Host "[$now] [ERROR] Xray process not found. Printing last logs and exiting."
-              if (Test-Path ${env:XRAY_LOG_PATH}) {
-                Get-Content ${env:XRAY_LOG_PATH} -Tail 200
+              if (Test-Path ${env:XRAY_STDOUT_LOG_PATH}) {
+                Write-Host "[$now] [LOG] Last 200 stdout lines:"
+                Get-Content ${env:XRAY_STDOUT_LOG_PATH} -Tail 200
+              }
+              if (Test-Path ${env:XRAY_STDERR_LOG_PATH}) {
+                Write-Host "[$now] [LOG] Last 200 stderr lines:"
+                Get-Content ${env:XRAY_STDERR_LOG_PATH} -Tail 200
               }
               exit 1
             }
@@ -239,9 +253,14 @@ jobs:
               Write-Host "[$now] [OK] Xray PID=${env:XRAY_PID} listening on TCP/${env:XRAY_PORT}."
             }
 
-            if (Test-Path ${env:XRAY_LOG_PATH}) {
-              Write-Host "[$now] [LOG] Last 25 lines of Xray runtime log:"
-              Get-Content ${env:XRAY_LOG_PATH} -Tail 25
+            if (Test-Path ${env:XRAY_STDOUT_LOG_PATH}) {
+              Write-Host "[$now] [LOG] Last 25 stdout lines:"
+              Get-Content ${env:XRAY_STDOUT_LOG_PATH} -Tail 25
+            }
+
+            if (Test-Path ${env:XRAY_STDERR_LOG_PATH}) {
+              Write-Host "[$now] [LOG] Last 25 stderr lines:"
+              Get-Content ${env:XRAY_STDERR_LOG_PATH} -Tail 25
             }
 
             Start-Sleep -Seconds 120
