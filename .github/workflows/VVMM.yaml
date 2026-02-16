@@ -41,21 +41,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $api = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-          Write-Host "[INFO] Fetching latest Xray release from GitHub API..."
-
-          $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "github-actions" }
-          $asset = $release.assets | Where-Object { $_.name -match "Xray-windows-64.zip" } | Select-Object -First 1
-
-          if (-not $asset) {
-            throw "Could not find Xray-windows-64.zip in latest release assets."
-          }
-
+          $downloadUrl = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip"
           $zipPath = "$env:RUNNER_TEMP\\xray.zip"
           $installDir = "C:\\xray"
 
-          Write-Host "[INFO] Downloading: $($asset.browser_download_url)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+          Write-Host "[INFO] Downloading latest Xray from stable direct URL..."
+          Write-Host "[INFO] URL: $downloadUrl"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
 
           if (Test-Path $installDir) {
             Remove-Item -Recurse -Force $installDir
