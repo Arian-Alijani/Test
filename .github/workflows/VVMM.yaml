@@ -26,20 +26,31 @@ jobs:
         id: repo_runners
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RUNNER_READ_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
+          TOKEN="${GH_TOKEN:-}"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="$FALLBACK_TOKEN"
+            echo "RUNNER_READ_TOKEN is not set. Using github.token (may return 403 for self-hosted runner APIs)."
+          else
+            echo "Using RUNNER_READ_TOKEN secret for runner inventory API calls."
+          fi
+
           API_URL="https://api.github.com/repos/${REPO}/actions/runners?per_page=100"
           HTTP_CODE="$(curl -sS -w "%{http_code}" -o repo-runners.json \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "$API_URL")"
 
           if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "Failed to fetch repo runners. HTTP=$HTTP_CODE"
+            echo "Could not fetch repo runners. HTTP=$HTTP_CODE (continuing)."
             cat repo-runners.json
-            exit 1
+            echo "{\"note\":\"repo runner listing unavailable\",\"http_code\":\"$HTTP_CODE\"}" > repo-runners.json
+            echo "total_repo_runners=0" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           TOTAL="$(jq -r '.total_count // 0' repo-runners.json)"
@@ -51,24 +62,32 @@ jobs:
           set -Eeuo pipefail
           echo "=== Repository Runners ==="
           jq -r '
-            if (.runners | length) == 0 then
+            if has("runners") and (.runners | length) == 0 then
               "No runners visible at repository level."
-            else
+            elif has("runners") then
               .runners[]
               | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
+            else
+              "Repository runners unavailable (likely missing permission token)."
             end
           ' repo-runners.json
 
       - name: Try organization runners (best effort)
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RUNNER_READ_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
           ORG: ${{ github.repository_owner }}
         run: |
           set -Eeuo pipefail
+          TOKEN="${GH_TOKEN:-}"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="$FALLBACK_TOKEN"
+          fi
+
           API_URL="https://api.github.com/orgs/${ORG}/actions/runners?per_page=100"
           HTTP_CODE="$(curl -sS -w "%{http_code}" -o org-runners.json \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "$API_URL" || true)"
 
@@ -100,11 +119,13 @@ jobs:
             echo
             echo "### Repository Runners"
             jq -r '
-              if (.runners | length) == 0 then
+              if has("runners") and (.runners | length) == 0 then
                 "- No runners visible."
-              else
+              elif has("runners") then
                 .runners[]
                 | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
+              else
+                "- Unavailable: insufficient permission token for repository runner API."
               end
             ' repo-runners.json
             echo
@@ -121,6 +142,10 @@ jobs:
                 "- Unavailable: insufficient permission or not an org repository."
               end
             ' org-runners.json
+            echo
+            echo "### Note"
+            echo "- For full visibility, set repository secret \`RUNNER_READ_TOKEN\`."
+            echo "- Fine-grained PAT needs repository Administration (read) for repo runners; org runners also require org-level permissions."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload runner reports
