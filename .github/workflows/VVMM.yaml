@@ -158,7 +158,7 @@ jobs:
           netsh advfirewall firewall add rule name="Xray-VLESS-REALITY" dir=in action=allow protocol=TCP localport=${env:XRAY_PORT}
           Write-Host "[INFO] Firewall rule applied for TCP/${env:XRAY_PORT}."
 
-      - name: Start Xray server
+      - name: Start server, print URI, and keep alive
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -184,16 +184,7 @@ jobs:
             throw "Xray process is not running."
           }
 
-          "XRAY_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "XRAY_STDOUT_LOG_PATH=$stdoutLogPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "XRAY_STDERR_LOG_PATH=$stderrLogPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "[INFO] Xray started with PID: $($proc.Id)"
-
-      - name: Build and print client URI
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
           Write-Host "[INFO] Detecting public IP..."
           $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
           if (-not $publicIp) {
@@ -216,15 +207,11 @@ jobs:
           Write-Host "======================================================"
           Write-Host ""
 
-          # Useful for copying from step summary too
           "### VLESS + REALITY" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           $uri | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-      - name: Runtime diagnostics loop
-        shell: pwsh
-        run: |
           $ErrorActionPreference = "Continue"
           Write-Host "[INFO] Entering diagnostics loop. Workflow keeps server alive until timeout/cancel."
 
@@ -232,16 +219,16 @@ jobs:
             $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             Write-Host "[$now] [HEALTH] Checking process + port status..."
 
-            $proc = Get-Process -Id ${env:XRAY_PID} -ErrorAction SilentlyContinue
-            if (-not $proc) {
+            $liveProc = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+            if (-not $liveProc) {
               Write-Host "[$now] [ERROR] Xray process not found. Printing last logs and exiting."
-              if (Test-Path ${env:XRAY_STDOUT_LOG_PATH}) {
+              if (Test-Path $stdoutLogPath) {
                 Write-Host "[$now] [LOG] Last 200 stdout lines:"
-                Get-Content ${env:XRAY_STDOUT_LOG_PATH} -Tail 200
+                Get-Content $stdoutLogPath -Tail 200
               }
-              if (Test-Path ${env:XRAY_STDERR_LOG_PATH}) {
+              if (Test-Path $stderrLogPath) {
                 Write-Host "[$now] [LOG] Last 200 stderr lines:"
-                Get-Content ${env:XRAY_STDERR_LOG_PATH} -Tail 200
+                Get-Content $stderrLogPath -Tail 200
               }
               exit 1
             }
@@ -250,17 +237,16 @@ jobs:
             if (-not $conn) {
               Write-Host "[$now] [WARN] Port ${env:XRAY_PORT} is not in LISTEN state."
             } else {
-              Write-Host "[$now] [OK] Xray PID=${env:XRAY_PID} listening on TCP/${env:XRAY_PORT}."
+              Write-Host "[$now] [OK] Xray PID=$($proc.Id) listening on TCP/${env:XRAY_PORT}."
             }
 
-            if (Test-Path ${env:XRAY_STDOUT_LOG_PATH}) {
+            if (Test-Path $stdoutLogPath) {
               Write-Host "[$now] [LOG] Last 25 stdout lines:"
-              Get-Content ${env:XRAY_STDOUT_LOG_PATH} -Tail 25
+              Get-Content $stdoutLogPath -Tail 25
             }
-
-            if (Test-Path ${env:XRAY_STDERR_LOG_PATH}) {
+            if (Test-Path $stderrLogPath) {
               Write-Host "[$now] [LOG] Last 25 stderr lines:"
-              Get-Content ${env:XRAY_STDERR_LOG_PATH} -Tail 25
+              Get-Content $stderrLogPath -Tail 25
             }
 
             Start-Sleep -Seconds 120
