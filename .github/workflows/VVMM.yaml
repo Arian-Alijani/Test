@@ -1,6 +1,9 @@
 name: V2Ray Windows VPN (VLESS+REALITY)
 
 on:
+  push:
+    branches:
+      - "**"
   workflow_dispatch:
 
 jobs:
