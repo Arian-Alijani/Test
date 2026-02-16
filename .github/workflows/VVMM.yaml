@@ -1,35 +1,245 @@
-name: Self-Hosted Runner Smoke Test
+name: V2Ray Windows VPN (VLESS+REALITY)
 
 on:
   workflow_dispatch:
 
 jobs:
-  smoke:
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 10
+  v2ray-server:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
     steps:
-      - name: Print runner context
-        shell: bash
+      - name: Prepare server variables
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          echo "Runner picked successfully."
-          echo "RUNNER_NAME=${RUNNER_NAME}"
-          echo "RUNNER_OS=${RUNNER_OS}"
-          echo "RUNNER_ARCH=${RUNNER_ARCH}"
-          echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
-          echo "GITHUB_RUN_ID=${GITHUB_RUN_ID}"
-          echo "UTC_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          $ErrorActionPreference = "Stop"
 
-      - name: Validate expected platform
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          [[ "${RUNNER_OS}" == "Linux" ]] || { echo "Expected Linux runner, got ${RUNNER_OS}"; exit 1; }
-          [[ "${RUNNER_ARCH}" == "X64" ]] || { echo "Expected X64 runner, got ${RUNNER_ARCH}"; exit 1; }
-          echo "Platform validation passed."
+          # Core parameters (change only if needed)
+          $port = 443
+          $serverName = "www.cloudflare.com"
+          $fingerprint = "chrome"
 
-      - name: Done
-        shell: bash
+          # Generate secure server values
+          $uuid = [guid]::NewGuid().ToString()
+          $shortIdBytes = New-Object 'System.Byte[]' 8
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($shortIdBytes)
+          $shortId = ($shortIdBytes | ForEach-Object { $_.ToString("x2") }) -join ''
+
+          "XRAY_PORT=$port" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_UUID=$uuid" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_SNI=$serverName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_FP=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_SHORT_ID=$shortId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "[INFO] Base parameters generated."
+          Write-Host "[INFO] Port: $port | SNI: $serverName | Fingerprint: $fingerprint"
+
+      - name: Download and extract Xray
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          echo "کار انجام شد: self-hosted runner پیدا شد و job با موفقیت اجرا شد."
+          $ErrorActionPreference = "Stop"
+          $api = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+          Write-Host "[INFO] Fetching latest Xray release from GitHub API..."
+
+          $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "github-actions" }
+          $asset = $release.assets | Where-Object { $_.name -match "Xray-windows-64.zip" } | Select-Object -First 1
+
+          if (-not $asset) {
+            throw "Could not find Xray-windows-64.zip in latest release assets."
+          }
+
+          $zipPath = "$env:RUNNER_TEMP\\xray.zip"
+          $installDir = "C:\\xray"
+
+          Write-Host "[INFO] Downloading: $($asset.browser_download_url)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+
+          if (Test-Path $installDir) {
+            Remove-Item -Recurse -Force $installDir
+          }
+          New-Item -ItemType Directory -Path $installDir | Out-Null
+
+          Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+          if (-not (Test-Path "C:\\xray\\xray.exe")) {
+            throw "xray.exe was not found after extraction."
+          }
+
+          "XRAY_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "[INFO] Xray installed at: $installDir"
+          & "C:\\xray\\xray.exe" version
+
+      - name: Generate REALITY keypair
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $xrayExe = "${env:XRAY_DIR}\\xray.exe"
+
+          Write-Host "[INFO] Generating X25519 keypair for REALITY..."
+          $keysOutput = & $xrayExe x25519
+          $privateKey = ($keysOutput | Select-String "Private key" | ForEach-Object { ($_ -split ':')[1].Trim() })
+          $publicKey = ($keysOutput | Select-String "Public key" | ForEach-Object { ($_ -split ':')[1].Trim() })
+
+          if (-not $privateKey -or -not $publicKey) {
+            throw "Failed to parse REALITY keypair from xray x25519 output."
+          }
+
+          "XRAY_PRIVATE_KEY=$privateKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_PUBLIC_KEY=$publicKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "[INFO] REALITY keypair generated successfully."
+
+      - name: Create Xray server config
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $configPath = "${env:XRAY_DIR}\\config.json"
+
+          $config = @"
+{
+  "log": {
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": ${env:XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${env:XRAY_UUID}",
+            "flow": "xtls-rprx-vision",
+            "email": "gha-user"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${env:XRAY_SNI}:443",
+          "xver": 0,
+          "serverNames": [
+            "${env:XRAY_SNI}"
+          ],
+          "privateKey": "${env:XRAY_PRIVATE_KEY}",
+          "shortIds": [
+            "${env:XRAY_SHORT_ID}"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
+}
+"@
+
+          $config | Out-File -FilePath $configPath -Encoding ascii -Force
+          Write-Host "[INFO] Xray config written to: $configPath"
+          Write-Host "[INFO] Validating config..."
+          & "${env:XRAY_DIR}\\xray.exe" -test -c $configPath
+
+      - name: Open firewall port
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          netsh advfirewall firewall delete rule name="Xray-VLESS-REALITY" | Out-Null
+          netsh advfirewall firewall add rule name="Xray-VLESS-REALITY" dir=in action=allow protocol=TCP localport=${env:XRAY_PORT}
+          Write-Host "[INFO] Firewall rule applied for TCP/${env:XRAY_PORT}."
+
+      - name: Start Xray server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $xrayExe = "${env:XRAY_DIR}\\xray.exe"
+          $configPath = "${env:XRAY_DIR}\\config.json"
+          $logPath = "${env:XRAY_DIR}\\xray-runtime.log"
+
+          Write-Host "[INFO] Starting Xray in background..."
+          $proc = Start-Process -FilePath $xrayExe -ArgumentList "run", "-c", $configPath -RedirectStandardOutput $logPath -RedirectStandardError $logPath -PassThru
+          Start-Sleep -Seconds 5
+
+          if ($proc.HasExited) {
+            Write-Host "[ERROR] Xray exited immediately. Dumping log:"
+            if (Test-Path $logPath) { Get-Content $logPath -Tail 200 }
+            throw "Xray process is not running."
+          }
+
+          "XRAY_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "XRAY_LOG_PATH=$logPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "[INFO] Xray started with PID: $($proc.Id)"
+
+      - name: Build and print client URI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "[INFO] Detecting public IP..."
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          if (-not $publicIp) {
+            throw "Could not detect public IP."
+          }
+
+          $uri = "vless://${env:XRAY_UUID}@${publicIp}:${env:XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${env:XRAY_SNI}&fp=${env:XRAY_FP}&pbk=${env:XRAY_PUBLIC_KEY}&sid=${env:XRAY_SHORT_ID}&type=tcp&headerType=none#GitHubActions-Windows"
+
+          Write-Host ""
+          Write-Host "==================== V2RAY OUTPUT ===================="
+          Write-Host "Public IP: $publicIp"
+          Write-Host "Port: ${env:XRAY_PORT}"
+          Write-Host "UUID: ${env:XRAY_UUID}"
+          Write-Host "PublicKey: ${env:XRAY_PUBLIC_KEY}"
+          Write-Host "ShortID: ${env:XRAY_SHORT_ID}"
+          Write-Host "SNI: ${env:XRAY_SNI}"
+          Write-Host ""
+          Write-Host "VLESS URI (import this in your client):"
+          Write-Host "$uri"
+          Write-Host "======================================================"
+          Write-Host ""
+
+          # Useful for copying from step summary too
+          "### VLESS + REALITY" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "\`\`\`" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $uri | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "\`\`\`" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Runtime diagnostics loop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          Write-Host "[INFO] Entering diagnostics loop. Workflow keeps server alive until timeout/cancel."
+
+          while ($true) {
+            $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Write-Host "[$now] [HEALTH] Checking process + port status..."
+
+            $proc = Get-Process -Id ${env:XRAY_PID} -ErrorAction SilentlyContinue
+            if (-not $proc) {
+              Write-Host "[$now] [ERROR] Xray process not found. Printing last logs and exiting."
+              if (Test-Path ${env:XRAY_LOG_PATH}) {
+                Get-Content ${env:XRAY_LOG_PATH} -Tail 200
+              }
+              exit 1
+            }
+
+            $conn = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]${env:XRAY_PORT} }
+            if (-not $conn) {
+              Write-Host "[$now] [WARN] Port ${env:XRAY_PORT} is not in LISTEN state."
+            } else {
+              Write-Host "[$now] [OK] Xray PID=${env:XRAY_PID} listening on TCP/${env:XRAY_PORT}."
+            }
+
+            if (Test-Path ${env:XRAY_LOG_PATH}) {
+              Write-Host "[$now] [LOG] Last 25 lines of Xray runtime log:"
+              Get-Content ${env:XRAY_LOG_PATH} -Tail 25
+            }
+
+            Start-Sleep -Seconds 120
+          }
