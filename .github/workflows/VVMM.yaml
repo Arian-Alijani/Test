@@ -71,9 +71,15 @@ jobs:
           $xrayExe = "${env:XRAY_DIR}\\xray.exe"
 
           Write-Host "[INFO] Generating X25519 keypair for REALITY..."
-          $keysOutput = & $xrayExe x25519
-          $privateKey = ($keysOutput | Select-String "Private key" | ForEach-Object { ($_ -split ':')[1].Trim() })
-          $publicKey = ($keysOutput | Select-String "Public key" | ForEach-Object { ($_ -split ':')[1].Trim() })
+          $keysRaw = (& $xrayExe x25519 2>&1 | Out-String).Trim()
+          Write-Host "[DEBUG] x25519 raw output:"
+          Write-Host $keysRaw
+
+          $privateMatch = [regex]::Match($keysRaw, '(?im)private\s*key\s*:\s*([A-Za-z0-9_\-+=\/]+)')
+          $publicMatch = [regex]::Match($keysRaw, '(?im)public\s*key\s*:\s*([A-Za-z0-9_\-+=\/]+)')
+
+          $privateKey = if ($privateMatch.Success) { $privateMatch.Groups[1].Value } else { "" }
+          $publicKey = if ($publicMatch.Success) { $publicMatch.Groups[1].Value } else { "" }
 
           if (-not $privateKey -or -not $publicKey) {
             throw "Failed to parse REALITY keypair from xray x25519 output."
