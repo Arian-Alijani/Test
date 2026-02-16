@@ -1,408 +1,132 @@
-name: Ephemeral V2Ray (Xray) Server - 6h
+name: List Available Runners
 
 on:
   workflow_dispatch:
-    inputs:
-      duration_hours:
-        description: "How many hours to keep server alive (1-6)"
-        required: true
-        default: "6"
-      port:
-        description: "Listening port"
-        required: true
-        default: "443"
-      server_name:
-        description: "Reality SNI (must be reachable HTTPS host)"
-        required: true
-        default: "www.cloudflare.com"
+  schedule:
+    - cron: "0 */6 * * *"
 
 permissions:
-  contents: read
   actions: read
+  contents: read
 
 jobs:
-  run-v2ray:
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 360
-    env:
-      DURATION_HOURS: ${{ inputs.duration_hours }}
-      XRAY_PORT: ${{ inputs.port }}
-      REALITY_SERVER_NAME: ${{ inputs.server_name }}
-      DEBUG_LOG: ${{ github.workspace }}/gha-debug.log
+  list-runners:
+    runs-on: ubuntu-latest
     steps:
-      - name: Init debug log
+      - name: Repo context
         shell: bash
         run: |
           set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Init debug log failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          : > "$DEBUG_LOG"
-          {
-            echo "========== DEBUG CONTEXT =========="
-            echo "date_utc: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-            echo "runner_name: ${RUNNER_NAME:-unknown}"
-            echo "runner_os: ${RUNNER_OS:-unknown}"
-            echo "runner_arch: ${RUNNER_ARCH:-unknown}"
-            echo "workspace: ${GITHUB_WORKSPACE:-unknown}"
-            echo "requested_duration_hours: ${DURATION_HOURS}"
-            echo "requested_port: ${XRAY_PORT}"
-            echo "requested_server_name: ${REALITY_SERVER_NAME}"
-            echo
-            echo "---- uname ----"
-            uname -a || true
-            echo
-            echo "---- ip -brief addr ----"
-            ip -brief addr || true
-            echo
-            echo "---- ip route ----"
-            ip route || true
-            echo "==================================="
-          } | tee -a "$DEBUG_LOG"
+          echo "repo=${GITHUB_REPOSITORY}"
+          echo "owner=${GITHUB_REPOSITORY_OWNER}"
+          echo "actor=${GITHUB_ACTOR}"
+          echo "run_id=${GITHUB_RUN_ID}"
 
-      - name: Validate runner type
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Validate runner type failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          if [[ "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
-            echo "This workflow is for self-hosted runner only."
-            echo "GitHub-hosted runners are not suitable for inbound V2Ray usage."
-            exit 1
-          fi
-          echo "[OK] runner type accepted: self-hosted" | tee -a "$DEBUG_LOG"
-
-      - name: Debug visible runners (best effort)
+      - name: Fetch repository runners
+        id: repo_runners
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
-          trap 'code=$?; echo "[WARN] Debug visible runners step failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit 0' ERR
-
-          echo "[INFO] trying to fetch visible runners from GitHub API for $REPO" | tee -a "$DEBUG_LOG"
           API_URL="https://api.github.com/repos/${REPO}/actions/runners?per_page=100"
+          HTTP_CODE="$(curl -sS -w "%{http_code}" -o repo-runners.json \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL")"
 
-          HTTP_CODE="$(curl -sS -w "%{http_code}" -o /tmp/runners.json \
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "Failed to fetch repo runners. HTTP=$HTTP_CODE"
+            cat repo-runners.json
+            exit 1
+          fi
+
+          TOTAL="$(jq -r '.total_count // 0' repo-runners.json)"
+          echo "total_repo_runners=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Print repository runners in logs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "=== Repository Runners ==="
+          jq -r '
+            if (.runners | length) == 0 then
+              "No runners visible at repository level."
+            else
+              .runners[]
+              | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
+            end
+          ' repo-runners.json
+
+      - name: Try organization runners (best effort)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          set -Eeuo pipefail
+          API_URL="https://api.github.com/orgs/${ORG}/actions/runners?per_page=100"
+          HTTP_CODE="$(curl -sS -w "%{http_code}" -o org-runners.json \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "$API_URL" || true)"
 
           if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "[WARN] cannot list runners via API (http=$HTTP_CODE). likely token permission limitation." | tee -a "$DEBUG_LOG"
-            cat /tmp/runners.json 2>/dev/null | head -n 40 | tee -a "$DEBUG_LOG" || true
+            echo "Cannot read org runners (likely permission scope). HTTP=$HTTP_CODE"
+            echo "{\"note\":\"org runner listing unavailable\",\"http_code\":\"$HTTP_CODE\"}" > org-runners.json
             exit 0
           fi
 
-          echo "[INFO] visible runners from API:" | tee -a "$DEBUG_LOG"
+          echo "=== Organization Runners ==="
           jq -r '
-            .runners[]
-            | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
-          ' /tmp/runners.json | tee -a "$DEBUG_LOG"
-
-          {
-            echo "## Runner Visibility"
-            echo
-            jq -r '
+            if (.runners | length) == 0 then
+              "No org runners visible."
+            else
               .runners[]
-              | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
-            ' /tmp/runners.json
+              | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
+            end
+          ' org-runners.json
+
+      - name: Build summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## Runner Inventory"
+            echo
+            echo "Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "Run ID: \`${GITHUB_RUN_ID}\`"
+            echo
+            echo "### Repository Runners"
+            jq -r '
+              if (.runners | length) == 0 then
+                "- No runners visible."
+              else
+                .runners[]
+                | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
+              end
+            ' repo-runners.json
+            echo
+            echo "### Organization Runners (best effort)"
+            jq -r '
+              if has("runners") then
+                if (.runners | length) == 0 then
+                  "- No org runners visible."
+                else
+                  .runners[]
+                  | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
+                end
+              else
+                "- Unavailable: insufficient permission or not an org repository."
+              end
+            ' org-runners.json
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Validate inputs
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Validate inputs failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          if ! [[ "$DURATION_HOURS" =~ ^[0-9]+$ ]]; then
-            echo "duration_hours must be an integer"
-            exit 1
-          fi
-          if (( DURATION_HOURS < 1 || DURATION_HOURS > 6 )); then
-            echo "duration_hours must be between 1 and 6"
-            exit 1
-          fi
-          if ! [[ "$XRAY_PORT" =~ ^[0-9]+$ ]]; then
-            echo "port must be numeric"
-            exit 1
-          fi
-          if (( XRAY_PORT < 1 || XRAY_PORT > 65535 )); then
-            echo "port must be 1..65535"
-            exit 1
-          fi
-          {
-            echo "[OK] input validation passed"
-            echo "duration_hours=$DURATION_HOURS"
-            echo "port=$XRAY_PORT"
-            echo "server_name=$REALITY_SERVER_NAME"
-          } | tee -a "$DEBUG_LOG"
-
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Install dependencies failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          echo "[INFO] apt-get update + install curl jq openssl" | tee -a "$DEBUG_LOG"
-          sudo apt-get update
-          sudo apt-get install -y curl jq openssl
-          {
-            echo "[OK] dependencies installed"
-            echo "curl_version: $(curl --version | head -n1)"
-            echo "openssl_version: $(openssl version)"
-          } | tee -a "$DEBUG_LOG"
-
-      - name: Install Xray
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Install Xray failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          echo "[INFO] downloading Xray install script" | tee -a "$DEBUG_LOG"
-          curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o /tmp/install-release.sh
-          sudo bash /tmp/install-release.sh install
-          {
-            echo "[OK] xray installed"
-            echo "xray_path: $(command -v xray || echo 'not_found')"
-            xray version 2>/dev/null | head -n 3 || true
-          } | tee -a "$DEBUG_LOG"
-
-      - name: Generate server config
-        id: cfg
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Generate server config failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-
-          UUID="$(cat /proc/sys/kernel/random/uuid)"
-          KEY_OUT="$(sudo xray x25519)"
-          PRIVATE_KEY="$(echo "$KEY_OUT" | awk '/Private key:/ {print $3}')"
-          PUBLIC_KEY="$(echo "$KEY_OUT" | awk '/Public key:/ {print $3}')"
-          SHORT_ID="$(openssl rand -hex 8)"
-
-          SERVER_IP="$(curl -4 -fsSL https://api.ipify.org || true)"
-          if [[ -z "$SERVER_IP" ]]; then
-            SERVER_IP="$(hostname -I | awk '{print $1}')"
-          fi
-
-          sudo mkdir -p /usr/local/etc/xray
-          sudo tee /usr/local/etc/xray/config.json > /dev/null <<JSON
-          {
-            "log": { "loglevel": "warning" },
-            "inbounds": [
-              {
-                "listen": "0.0.0.0",
-                "port": ${XRAY_PORT},
-                "protocol": "vless",
-                "settings": {
-                  "clients": [
-                    {
-                      "id": "${UUID}",
-                      "flow": "xtls-rprx-vision"
-                    }
-                  ],
-                  "decryption": "none"
-                },
-                "streamSettings": {
-                  "network": "tcp",
-                  "security": "reality",
-                  "realitySettings": {
-                    "show": false,
-                    "dest": "${REALITY_SERVER_NAME}:443",
-                    "xver": 0,
-                    "serverNames": ["${REALITY_SERVER_NAME}"],
-                    "privateKey": "${PRIVATE_KEY}",
-                    "shortIds": ["${SHORT_ID}"]
-                  }
-                }
-              }
-            ],
-            "outbounds": [
-              {
-                "protocol": "freedom"
-              }
-            ]
-          }
-          JSON
-          sudo xray run -test -config /usr/local/etc/xray/config.json | tee -a "$DEBUG_LOG"
-
-          VLESS_URI="vless://${UUID}@${SERVER_IP}:${XRAY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#gha-v2ray"
-
-          {
-            echo "SERVER_IP=$SERVER_IP"
-            echo "XRAY_PORT=$XRAY_PORT"
-            echo "UUID=$UUID"
-            echo "PUBLIC_KEY=$PUBLIC_KEY"
-            echo "SHORT_ID=$SHORT_ID"
-            echo "REALITY_SERVER_NAME=$REALITY_SERVER_NAME"
-            echo "VLESS_URI=$VLESS_URI"
-          } | tee connection.env
-
-          {
-            echo "VLESS URI (ready to import):"
-            echo "$VLESS_URI"
-            echo
-            echo "Raw fields:"
-            echo "server: $SERVER_IP"
-            echo "port: $XRAY_PORT"
-            echo "uuid: $UUID"
-            echo "public_key: $PUBLIC_KEY"
-            echo "short_id: $SHORT_ID"
-            echo "sni: $REALITY_SERVER_NAME"
-          } | tee connection.txt
-
-          cat > client-config.json <<JSON
-          {
-            "log": {
-              "loglevel": "warning"
-            },
-            "inbounds": [
-              {
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": 10808,
-                "protocol": "socks",
-                "settings": {
-                  "udp": true
-                }
-              }
-            ],
-            "outbounds": [
-              {
-                "tag": "proxy",
-                "protocol": "vless",
-                "settings": {
-                  "vnext": [
-                    {
-                      "address": "${SERVER_IP}",
-                      "port": ${XRAY_PORT},
-                      "users": [
-                        {
-                          "id": "${UUID}",
-                          "encryption": "none",
-                          "flow": "xtls-rprx-vision"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                "streamSettings": {
-                  "network": "tcp",
-                  "security": "reality",
-                  "realitySettings": {
-                    "serverName": "${REALITY_SERVER_NAME}",
-                    "fingerprint": "chrome",
-                    "publicKey": "${PUBLIC_KEY}",
-                    "shortId": "${SHORT_ID}",
-                    "spiderX": "/"
-                  }
-                }
-              },
-              {
-                "tag": "direct",
-                "protocol": "freedom"
-              }
-            ],
-            "routing": {
-              "domainStrategy": "AsIs",
-              "rules": [
-                {
-                  "type": "field",
-                  "outboundTag": "proxy",
-                  "network": "tcp,udp"
-                }
-              ]
-            }
-          }
-          JSON
-
-          {
-            echo "Client JSON generated:"
-            echo "client-config.json"
-          } >> connection.txt
-
-          {
-            echo "## Ready V2Ray Config"
-            echo
-            echo "Copy this link to your client:"
-            echo
-            echo "\`$VLESS_URI\`"
-            echo
-            echo "Artifact files:"
-            echo "- connection.txt"
-            echo "- connection.env"
-            echo "- client-config.json"
-            echo "- /tmp/xray.log"
-            echo "- gha-debug.log"
-          } >> "$GITHUB_STEP_SUMMARY"
-          {
-            echo "[OK] server/client config generated"
-            echo "server_ip=$SERVER_IP"
-            echo "listen_port=$XRAY_PORT"
-            echo "short_id=$SHORT_ID"
-          } | tee -a "$DEBUG_LOG"
-
-      - name: Start Xray
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Start Xray failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; sudo tail -n 200 /tmp/xray.log || true; exit $code' ERR
-          sudo pkill -f "xray run" || true
-          sudo nohup xray run -config /usr/local/etc/xray/config.json >/tmp/xray.log 2>&1 &
-          sleep 3
-          if ! pgrep -f "xray run" >/dev/null; then
-            echo "Xray did not start."
-            sudo tail -n 200 /tmp/xray.log || true
-            exit 1
-          fi
-          echo "Xray started successfully."
-          {
-            echo "[OK] xray process running"
-            pgrep -a -f "xray run" || true
-            echo "---- listening sockets (port $XRAY_PORT) ----"
-            sudo ss -lntp | grep ":${XRAY_PORT} " || true
-          } | tee -a "$DEBUG_LOG"
-
-      - name: Show ready client config
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Show ready client config failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          cat connection.txt
-
-      - name: Keep server alive
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Keep server alive failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; sudo tail -n 200 /tmp/xray.log || true; exit $code' ERR
-          TOTAL_SECONDS=$((DURATION_HOURS * 3600))
-          END_TIME=$((SECONDS + TOTAL_SECONDS))
-          while (( SECONDS < END_TIME )); do
-            LEFT=$((END_TIME - SECONDS))
-            echo "Server is alive. Remaining: ${LEFT}s"
-            if ! pgrep -f "xray run" >/dev/null; then
-              echo "[ERROR] xray process stopped unexpectedly" | tee -a "$DEBUG_LOG"
-              sudo tail -n 200 /tmp/xray.log || true
-              exit 1
-            fi
-            echo "heartbeat_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ") remaining=${LEFT}s" >> "$DEBUG_LOG"
-            sleep 60
-          done
-
-      - name: Upload connection info
-        if: always()
+      - name: Upload runner reports
         uses: actions/upload-artifact@v4
         with:
-          name: v2ray-connection
+          name: runner-inventory
           path: |
-            connection.txt
-            connection.env
-            client-config.json
-            gha-debug.log
-            /tmp/xray.log
-
-      - name: Stop Xray
-        if: always()
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          trap 'code=$?; echo "[ERROR] Stop Xray failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit $code' ERR
-          sudo pkill -f "xray run" || true
-          echo "[INFO] xray stopped (or already not running)" | tee -a "$DEBUG_LOG"
+            repo-runners.json
+            org-runners.json
