@@ -75,11 +75,19 @@ jobs:
           Write-Host "[DEBUG] x25519 raw output:"
           Write-Host $keysRaw
 
-          $privateMatch = [regex]::Match($keysRaw, '(?im)private\s*key\s*:\s*([A-Za-z0-9_\-+=\/]+)')
-          $publicMatch = [regex]::Match($keysRaw, '(?im)public\s*key\s*:\s*([A-Za-z0-9_\-+=\/]+)')
+          $privateMatch = [regex]::Match($keysRaw, '(?im)(?:private\s*key|privatekey)\s*:\s*([A-Za-z0-9_\-+=\/]+)')
+          $publicMatch = [regex]::Match($keysRaw, '(?im)(?:public\s*key|publickey)\s*:\s*([A-Za-z0-9_\-+=\/]+)')
+          $passwordMatch = [regex]::Match($keysRaw, '(?im)password\s*:\s*([A-Za-z0-9_\-+=\/]+)')
 
           $privateKey = if ($privateMatch.Success) { $privateMatch.Groups[1].Value } else { "" }
-          $publicKey = if ($publicMatch.Success) { $publicMatch.Groups[1].Value } else { "" }
+          $publicKey = if ($publicMatch.Success) {
+            $publicMatch.Groups[1].Value
+          } elseif ($passwordMatch.Success) {
+            Write-Host "[WARN] Public key not found. Using 'Password' field from xray output as client key."
+            $passwordMatch.Groups[1].Value
+          } else {
+            ""
+          }
 
           if (-not $privateKey -or -not $publicKey) {
             throw "Failed to parse REALITY keypair from xray x25519 output."
