@@ -64,6 +64,32 @@ jobs:
           Write-Host "[INFO] Base parameters generated."
           Write-Host "[INFO] Port: $port | SNI: $serverName | Fingerprint: $fingerprint"
 
+      - name: Detect server IP for ping test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "[INFO] Detecting server public IP for connectivity tests..."
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          if (-not $publicIp) {
+            throw "Could not detect public IP."
+          }
+
+          "SERVER_PUBLIC_IP=$publicIp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host ""
+          Write-Host "==================== SERVER IP FOR PING ===================="
+          Write-Host "Server Public IP: $publicIp"
+          Write-Host "SERVER_PUBLIC_IP_FOR_PING=$publicIp"
+          Write-Host "Linux/macOS test: ping -c 4 $publicIp"
+          Write-Host "Windows test: ping $publicIp"
+          Write-Host "============================================================"
+          Write-Host ""
+
+          "### Server IP For Ping" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "IP: $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Windows ping: ping $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Linux/macOS ping: ping -c 4 $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
       - name: Download and extract Xray
         shell: pwsh
         run: |
@@ -212,8 +238,11 @@ jobs:
           }
 
           Write-Host "[INFO] Xray started with PID: $($proc.Id)"
-          Write-Host "[INFO] Detecting public IP..."
-          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          $publicIp = $env:SERVER_PUBLIC_IP
+          if ([string]::IsNullOrWhiteSpace($publicIp)) {
+            Write-Host "[WARN] SERVER_PUBLIC_IP not found in env. Detecting again..."
+            $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          }
           if (-not $publicIp) {
             throw "Could not detect public IP."
           }
@@ -333,6 +362,32 @@ jobs:
           Write-Host "[INFO] SSH variables prepared."
           Write-Host "[INFO] Port: $sshPort | Username: $sshUser"
 
+      - name: Detect server IP for ping test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "[INFO] Detecting server public IP for connectivity tests..."
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          if (-not $publicIp) {
+            throw "Could not detect public IP."
+          }
+
+          "SERVER_PUBLIC_IP=$publicIp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host ""
+          Write-Host "==================== SERVER IP FOR PING ===================="
+          Write-Host "Server Public IP: $publicIp"
+          Write-Host "SERVER_PUBLIC_IP_FOR_PING=$publicIp"
+          Write-Host "Linux/macOS test: ping -c 4 $publicIp"
+          Write-Host "Windows test: ping $publicIp"
+          Write-Host "============================================================"
+          Write-Host ""
+
+          "### Server IP For Ping" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "IP: $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Windows ping: ping $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Linux/macOS ping: ping -c 4 $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
       - name: Configure SSH server, print access, and keep alive
         shell: pwsh
         run: |
@@ -405,7 +460,11 @@ jobs:
             throw "sshd is not listening on port $env:SSH_PORT."
           }
 
-          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          $publicIp = $env:SERVER_PUBLIC_IP
+          if ([string]::IsNullOrWhiteSpace($publicIp)) {
+            Write-Host "[WARN] SERVER_PUBLIC_IP not found in env. Detecting again..."
+            $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          }
           if (-not $publicIp) {
             throw "Could not detect public IP."
           }
