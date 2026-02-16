@@ -6,13 +6,30 @@ on:
       - "**"
   workflow_dispatch:
     inputs:
+      connection_mode:
+        description: "Choose connection type"
+        required: true
+        type: choice
+        default: "v2ray"
+        options:
+          - v2ray
+          - ssh
       cloudflare_sni:
         description: "Cloudflare hostname for REALITY SNI (example: www.cloudflare.com)"
         required: false
         default: "www.cloudflare.com"
+      ssh_port:
+        description: "SSH listening port (used only in ssh mode)"
+        required: false
+        default: "443"
+      ssh_username:
+        description: "SSH username (used only in ssh mode)"
+        required: false
+        default: "ghssh"
 
 jobs:
   v2ray-server:
+    if: ${{ github.event_name == 'push' || github.event.inputs.connection_mode == 'v2ray' }}
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -257,6 +274,187 @@ jobs:
             if (Test-Path $stderrLogPath) {
               Write-Host "[$now] [LOG] Last 25 stderr lines:"
               Get-Content $stderrLogPath -Tail 25
+            }
+
+            Start-Sleep -Seconds 120
+          }
+
+  ssh-server:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.connection_mode == 'ssh' }}
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Prepare SSH variables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $sshPortText = "${{ github.event.inputs.ssh_port }}"
+          if ([string]::IsNullOrWhiteSpace($sshPortText)) {
+            $sshPortText = "443"
+          }
+
+          [int]$sshPort = 0
+          if (-not [int]::TryParse($sshPortText, [ref]$sshPort)) {
+            throw "Invalid ssh_port. It must be a number."
+          }
+          if ($sshPort -lt 1 -or $sshPort -gt 65535) {
+            throw "Invalid ssh_port range. Use 1..65535."
+          }
+
+          $sshUser = "${{ github.event.inputs.ssh_username }}"
+          if ([string]::IsNullOrWhiteSpace($sshUser)) {
+            $sshUser = "ghssh"
+          }
+          $sshUser = $sshUser.Trim()
+          if ($sshUser -notmatch '^[a-zA-Z0-9._-]{3,20}$') {
+            throw "Invalid ssh_username. Allowed: a-z, A-Z, 0-9, . _ - (3..20 chars)."
+          }
+
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+            Upper   = [char[]](65..90)
+            Lower   = [char[]](97..122)
+            Number  = [char[]](48..57)
+            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper   | Get-Random -Count 4
+          $rawPassword += $charSet.Lower   | Get-Random -Count 4
+          $rawPassword += $charSet.Number  | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $sshPass = -join ($rawPassword | Sort-Object { Get-Random })
+
+          "SSH_PORT=$sshPort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SSH_USER=$sshUser" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SSH_PASS=$sshPass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "[INFO] SSH variables prepared."
+          Write-Host "[INFO] Port: $sshPort | Username: $sshUser"
+
+      - name: Configure SSH server, print access, and keep alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "[INFO] Installing OpenSSH.Server capability if required..."
+          $cap = Get-WindowsCapability -Online | Where-Object { $_.Name -like 'OpenSSH.Server*' } | Select-Object -First 1
+          if (-not $cap) {
+            throw "OpenSSH.Server capability was not found on this runner."
+          }
+          if ($cap.State -ne "Installed") {
+            Add-WindowsCapability -Online -Name $cap.Name
+          }
+
+          $securePass = ConvertTo-SecureString $env:SSH_PASS -AsPlainText -Force
+          $existingUser = Get-LocalUser -Name $env:SSH_USER -ErrorAction SilentlyContinue
+          if ($existingUser) {
+            Write-Host "[INFO] SSH user exists. Resetting password..."
+            Set-LocalUser -Name $env:SSH_USER -Password $securePass
+          } else {
+            Write-Host "[INFO] Creating SSH user..."
+            New-LocalUser -Name $env:SSH_USER -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group "Users" -Member $env:SSH_USER
+          }
+
+          $sshdConfigPath = "$env:ProgramData\\ssh\\sshd_config"
+          if (-not (Test-Path $sshdConfigPath)) {
+            throw "sshd_config not found at $sshdConfigPath"
+          }
+
+          $script:configLines = Get-Content $sshdConfigPath
+          function Set-SshdOption([string]$Key, [string]$Value) {
+            $pattern = "^[#\s]*$Key\s+.*$"
+            $line = "$Key $Value"
+            if ($script:configLines -match $pattern) {
+              $script:configLines = $script:configLines | ForEach-Object {
+                if ($_ -match $pattern) { $line } else { $_ }
+              }
+            } else {
+              $script:configLines += $line
+            }
+          }
+
+          Set-SshdOption -Key "Port" -Value "$env:SSH_PORT"
+          Set-SshdOption -Key "PasswordAuthentication" -Value "yes"
+          Set-SshdOption -Key "PubkeyAuthentication" -Value "yes"
+          Set-SshdOption -Key "PermitEmptyPasswords" -Value "no"
+          Set-SshdOption -Key "AllowTcpForwarding" -Value "yes"
+          Set-SshdOption -Key "GatewayPorts" -Value "no"
+          Set-SshdOption -Key "AllowUsers" -Value "$env:SSH_USER"
+
+          $script:configLines | Set-Content -Path $sshdConfigPath -Encoding ascii
+          Write-Host "[INFO] sshd_config updated."
+
+          netsh advfirewall firewall delete rule name="SSH-VPN-Custom" | Out-Null
+          netsh advfirewall firewall add rule name="SSH-VPN-Custom" dir=in action=allow protocol=TCP localport=$env:SSH_PORT
+          Write-Host "[INFO] Firewall rule applied for TCP/$env:SSH_PORT."
+
+          Set-Service -Name sshd -StartupType Automatic
+          Restart-Service -Name sshd -Force
+          Start-Sleep -Seconds 3
+
+          $svc = Get-Service -Name sshd -ErrorAction Stop
+          if ($svc.Status -ne "Running") {
+            throw "sshd service is not running."
+          }
+
+          $listen = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]$env:SSH_PORT }
+          if (-not $listen) {
+            throw "sshd is not listening on port $env:SSH_PORT."
+          }
+
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org").ToString().Trim()
+          if (-not $publicIp) {
+            throw "Could not detect public IP."
+          }
+
+          $sshCmd = "ssh $env:SSH_USER@$publicIp -p $env:SSH_PORT"
+          $socksCmd = "ssh -N -D 127.0.0.1:1080 $env:SSH_USER@$publicIp -p $env:SSH_PORT"
+
+          Write-Host ""
+          Write-Host "==================== SSH OUTPUT ===================="
+          Write-Host "Public IP: $publicIp"
+          Write-Host "Port: $env:SSH_PORT"
+          Write-Host "Username: $env:SSH_USER"
+          Write-Host "Password: $env:SSH_PASS"
+          Write-Host ""
+          Write-Host "SSH connect:"
+          Write-Host "$sshCmd"
+          Write-Host ""
+          Write-Host "SOCKS5 VPN-like tunnel:"
+          Write-Host "$socksCmd"
+          Write-Host "===================================================="
+          Write-Host ""
+
+          "### SSH Access" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Host: $publicIp" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Port: $env:SSH_PORT" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Username: $env:SSH_USER" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Password: $env:SSH_PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "SOCKS command:" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $socksCmd | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          $ErrorActionPreference = "Continue"
+          Write-Host "[INFO] Entering SSH diagnostics loop. Workflow keeps server alive until timeout/cancel."
+          while ($true) {
+            $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+            if (-not $svc -or $svc.Status -ne "Running") {
+              Write-Host "[$now] [ERROR] sshd service is not running."
+              Get-WinEvent -LogName "OpenSSH/Operational" -MaxEvents 20 -ErrorAction SilentlyContinue | `
+                Select-Object TimeCreated, Id, LevelDisplayName, Message | Format-List
+              exit 1
+            }
+
+            $listen = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]$env:SSH_PORT }
+            if (-not $listen) {
+              Write-Host "[$now] [WARN] sshd is not listening on TCP/$env:SSH_PORT."
+            } else {
+              Write-Host "[$now] [OK] sshd running and listening on TCP/$env:SSH_PORT."
             }
 
             Start-Sleep -Seconds 120
