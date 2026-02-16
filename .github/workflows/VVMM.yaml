@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   run-v2ray:
@@ -68,6 +69,44 @@ jobs:
             exit 1
           fi
           echo "[OK] runner type accepted: self-hosted" | tee -a "$DEBUG_LOG"
+
+      - name: Debug visible runners (best effort)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          trap 'code=$?; echo "[WARN] Debug visible runners step failed at line $LINENO (exit $code)" | tee -a "$DEBUG_LOG"; exit 0' ERR
+
+          echo "[INFO] trying to fetch visible runners from GitHub API for $REPO" | tee -a "$DEBUG_LOG"
+          API_URL="https://api.github.com/repos/${REPO}/actions/runners?per_page=100"
+
+          HTTP_CODE="$(curl -sS -w "%{http_code}" -o /tmp/runners.json \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL" || true)"
+
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "[WARN] cannot list runners via API (http=$HTTP_CODE). likely token permission limitation." | tee -a "$DEBUG_LOG"
+            cat /tmp/runners.json 2>/dev/null | head -n 40 | tee -a "$DEBUG_LOG" || true
+            exit 0
+          fi
+
+          echo "[INFO] visible runners from API:" | tee -a "$DEBUG_LOG"
+          jq -r '
+            .runners[]
+            | "- name=\(.name) status=\(.status) busy=\(.busy) labels=[\(.labels | map(.name) | join(","))]"
+          ' /tmp/runners.json | tee -a "$DEBUG_LOG"
+
+          {
+            echo "## Runner Visibility"
+            echo
+            jq -r '
+              .runners[]
+              | "- \(.name) | status=\(.status) | busy=\(.busy) | labels=\(.labels | map(.name) | join(","))"
+            ' /tmp/runners.json
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate inputs
         shell: bash
