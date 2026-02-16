@@ -5,6 +5,11 @@ on:
     branches:
       - "**"
   workflow_dispatch:
+    inputs:
+      cloudflare_sni:
+        description: "Cloudflare hostname for REALITY SNI (example: www.cloudflare.com)"
+        required: false
+        default: "www.cloudflare.com"
 
 jobs:
   v2ray-server:
@@ -19,7 +24,12 @@ jobs:
 
           # Core parameters (change only if needed)
           $port = 443
-          $serverName = "www.cloudflare.com"
+          $serverName = "${{ github.event.inputs.cloudflare_sni }}"
+          if ([string]::IsNullOrWhiteSpace($serverName)) {
+            $serverName = "www.cloudflare.com"
+          }
+          $serverName = $serverName.Trim()
+          $serverName = ($serverName -replace '^https?://', '').Split('/')[0]
           $fingerprint = "chrome"
 
           # Generate secure server values
