@@ -98,54 +98,48 @@ jobs:
           $ErrorActionPreference = "Stop"
           $configPath = "${env:XRAY_DIR}\\config.json"
 
-          $config = @"
-{
-  "log": {
-    "loglevel": "debug"
-  },
-  "inbounds": [
-    {
-      "listen": "0.0.0.0",
-      "port": ${env:XRAY_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${env:XRAY_UUID}",
-            "flow": "xtls-rprx-vision",
-            "email": "gha-user"
+          $configObj = @{
+            log = @{
+              loglevel = "debug"
+            }
+            inbounds = @(
+              @{
+                listen = "0.0.0.0"
+                port = [int]$env:XRAY_PORT
+                protocol = "vless"
+                settings = @{
+                  clients = @(
+                    @{
+                      id = "$env:XRAY_UUID"
+                      flow = "xtls-rprx-vision"
+                      email = "gha-user"
+                    }
+                  )
+                  decryption = "none"
+                }
+                streamSettings = @{
+                  network = "tcp"
+                  security = "reality"
+                  realitySettings = @{
+                    show = $false
+                    dest = "${env:XRAY_SNI}:443"
+                    xver = 0
+                    serverNames = @("$env:XRAY_SNI")
+                    privateKey = "$env:XRAY_PRIVATE_KEY"
+                    shortIds = @("$env:XRAY_SHORT_ID")
+                  }
+                }
+              }
+            )
+            outbounds = @(
+              @{
+                protocol = "freedom"
+                settings = @{}
+              }
+            )
           }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${env:XRAY_SNI}:443",
-          "xver": 0,
-          "serverNames": [
-            "${env:XRAY_SNI}"
-          ],
-          "privateKey": "${env:XRAY_PRIVATE_KEY}",
-          "shortIds": [
-            "${env:XRAY_SHORT_ID}"
-          ]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ]
-}
-"@
 
-          $config | Out-File -FilePath $configPath -Encoding ascii -Force
+          $configObj | ConvertTo-Json -Depth 20 | Out-File -FilePath $configPath -Encoding ascii -Force
           Write-Host "[INFO] Xray config written to: $configPath"
           Write-Host "[INFO] Validating config..."
           & "${env:XRAY_DIR}\\xray.exe" -test -c $configPath
